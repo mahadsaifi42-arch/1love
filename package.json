@@ -1,7 +1,7 @@
 {
-  "name": "xlare-clone-bot",
-  "version": "1.0.0",
-  "description": "Professional Moderation & Music Bot",
+  "name": "xlare-pro-bot",
+  "version": "1.1.0",
+  "description": "Professional Moderation, Music & AFK Bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
