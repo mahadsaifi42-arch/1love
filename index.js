@@ -1,189 +1,243 @@
-require('dotenv').config();
 const { 
     Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, 
-    ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, 
-    ButtonStyle, ComponentType, Partials, ChannelType 
+    ActionRowBuilder, StringSelectMenuBuilder, Partials, ChannelType 
 } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection, AudioPlayerStatus } = require('@discordjs/voice');
 const play = require('play-dl');
 const express = require('express');
-const fs = require('fs');
+const Database = require('better-sqlite3');
+const dotenv = require('dotenv');
 
-// --- RENDER WEB SERVER ---
+dotenv.config();
+
+// --- DATABASE SETUP ---
+const db = new Database('bot.db');
+db.prepare('CREATE TABLE IF NOT EXISTS whitelist (guildId TEXT, userId TEXT, category TEXT, PRIMARY KEY(guildId, userId, category))').run();
+db.prepare('CREATE TABLE IF NOT EXISTS afk (userId TEXT PRIMARY KEY, reason TEXT, timestamp INTEGER)').run();
+
+// --- EXPRESS SERVER (Render Port Binding) ---
 const app = express();
 app.get('/', (req, res) => res.send('Bot is running ✅'));
 app.listen(process.env.PORT || 10000);
 
-// --- BOT INITIALIZATION ---
+// --- BOT CLIENT ---
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildVoiceStates
     ],
-    partials: [Partials.Message, Partials.Channel, Partials.Reaction],
-    allowedMentions: { repliedUser: false } // Mention off on replies
+    partials: [Partials.Message, Partials.Channel]
 });
 
-// --- CUSTOM EMOJIS & FALLBACKS ---
-const EMOJIS = {
-    success: '<a:TICK_TICK:1214893859151286272>',
-    error: '<a:4NDS_wrong:1458407390419615756>',
-    lock: '<a:lock_keyggchillhaven:1307838252568412202>',
-    music: '<a:Music:1438190819512422447>',
-    headphones: '<:0041_headphones:1443333046823813151>',
-    question: '<a:question:1264568031019925545>'
-};
-const getEmoji = (n) => EMOJIS[n] || '✅';
-
-// --- DATABASE ---
-const DB_PATH = './database.json';
-let db = {
-    whitelist: {}, afk: {}, 
-    greet: { welcomeChan: null, welcomeMsg: "Welcome {member}!", leaveChan: null, leaveMsg: "{member} left." },
-    tickets: { category: null, count: 0 }
-};
-if (fs.existsSync(DB_PATH)) db = JSON.parse(fs.readFileSync(DB_PATH));
-const saveDB = () => fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
-
-// --- STYLISH EMBED ---
-const xEmbed = (text, type = 'success') => new EmbedBuilder().setColor('#000000').setDescription(`${getEmoji(type)} ${text}`);
+const PREFIX = process.env.PREFIX || '$';
 
 // --- HELPERS ---
-const isWL = (id, cat) => (id === process.env.OWNER_ID || (db.whitelist[id] && (db.whitelist[id].includes(cat) || db.whitelist[id].includes('prefixless'))));
+const successEmoji = '☑️';
+const errorEmoji = '❎';
 
-const parseMsg = (msg, member) => msg.replace(/{member}/g, `${member}`).replace(/{server}/g, `${member.guild.name}`).replace(/{count}/g, `${member.guild.memberCount}`);
+const createEmbed = (text, isSuccess = true) => {
+    return new EmbedBuilder()
+        .setColor('#000000')
+        .setDescription(`${isSuccess ? successEmoji : errorEmoji} ${text}`);
+};
 
-// --- GREET EVENTS ---
-client.on('guildMemberAdd', m => {
-    if (!db.greet.welcomeChan) return;
-    const ch = m.guild.channels.cache.get(db.greet.welcomeChan);
-    if (ch) ch.send({ embeds: [new EmbedBuilder().setColor('#000000').setDescription(parseMsg(db.greet.welcomeMsg, m)).setThumbnail(m.user.displayAvatarURL())] });
-});
+const getWL = (guildId, userId) => {
+    const rows = db.prepare('SELECT category FROM whitelist WHERE guildId = ? AND userId = ?').all(guildId, userId);
+    return rows.map(r => r.category);
+};
 
-// --- COMMAND HANDLER ---
+// --- MUSIC HANDLER ---
+const players = new Map();
+
+// --- EVENTS ---
+client.on('ready', () => console.log(`${client.user.tag} is Online!`));
+
 client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
-    // AFK System
-    if (db.afk[message.author.id]) {
-        delete db.afk[message.author.id]; saveDB();
-        message.reply({ embeds: [xEmbed("Welcome back! AFK removed.")] }).then(m => setTimeout(() => m.delete(), 4000));
+    // 1. AFK REMOVAL LOGIC
+    const afkData = db.prepare('SELECT * FROM afk WHERE userId = ?').get(message.author.id);
+    if (afkData) {
+        db.prepare('DELETE FROM afk WHERE userId = ?').run(message.author.id);
+        return message.reply({ embeds: [createEmbed(`Welcome back! AFK removed.`)] });
     }
-    message.mentions.users.forEach(u => {
-        if (db.afk[u.id]) message.reply({ embeds: [xEmbed(`${u.tag} is AFK: ${db.afk[u.id].reason}`, 'headphones')] });
-    });
 
-    const prefix = process.env.PREFIX || '$';
-    let cmd, args;
-    if (message.content.startsWith(prefix)) {
-        args = message.content.slice(prefix.length).trim().split(/ +/);
-        cmd = args.shift().toLowerCase();
-    } else if (isWL(message.author.id, 'prefixless')) {
-        args = message.content.trim().split(/ +/);
-        cmd = args.shift().toLowerCase();
-    } else return;
+    // 2. AFK MENTION CHECK
+    if (message.mentions.users.size > 0) {
+        message.mentions.users.forEach(u => {
+            const data = db.prepare('SELECT * FROM afk WHERE userId = ?').get(u.id);
+            if (data) {
+                const timeAgo = Math.floor((Date.now() - data.timestamp) / 60000);
+                message.reply({ embeds: [createEmbed(`${u.tag} is AFK: ${data.reason} (${timeAgo}m ago)`, false)] });
+            }
+        });
+    }
 
-    const { member, channel, guild, author } = message;
+    // 3. PARSING LOGIC
+    const userWL = getWL(message.guild.id, message.author.id);
+    const isAdmin = message.member.permissions.has(PermissionsBitField.Flags.Administrator);
+    
+    let command, args;
+    const prefixlessMods = ['ban', 'unban', 'mute', 'unmute', 'kick', 'lock', 'unlock', 'hide', 'unhide', 'purge'];
 
+    if (message.content.startsWith(PREFIX)) {
+        args = message.content.slice(PREFIX.length).trim().split(/ +/);
+        command = args.shift().toLowerCase();
+    } else {
+        const firstWord = message.content.trim().split(/ +/)[0].toLowerCase();
+        if (prefixlessMods.includes(firstWord)) {
+            // Check if user is whitelisted for this specific command or has 'prefixless' cat
+            if (userWL.includes(firstWord) || userWL.includes('prefixless') || isAdmin) {
+                args = message.content.trim().split(/ +/);
+                command = args.shift().toLowerCase();
+            } else return; // Silent ignore
+        } else if (firstWord === 'afk') {
+            args = message.content.trim().split(/ +/);
+            command = args.shift().toLowerCase();
+        } else return; // Silent ignore
+    }
+
+    // --- COMMANDS ---
     try {
-        switch (cmd) {
-            case 'ping': message.reply({ embeds: [xEmbed(`Latency: \`${client.ws.ping}ms\``)] }); break;
+        const { member, channel, guild } = message;
 
-            // --- WHITELIST ---
+        switch (command) {
+            case 'ping':
+                message.reply({ embeds: [createEmbed(`Latency: \`${client.ws.ping}ms\``)] });
+                break;
+
+            case 'help':
+                const help = new EmbedBuilder().setColor('#000000').setTitle('Command List')
+                    .addFields(
+                        { name: 'Moderation', value: '`ban`, `unban`, `mute`, `unmute`, `kick`, `purge`', inline: true },
+                        { name: 'Channel', value: '`lock`, `unlock`, `hide`, `unhide`', inline: true },
+                        { name: 'Whitelist', value: '`wl add`, `wl remove`, `wl panel`, `wl list`', inline: true },
+                        { name: 'Music', value: '`play`, `stop`, `skip`, `pause`, `resume`', inline: true },
+                        { name: 'Utility', value: '`ping`, `afk`', inline: true }
+                    );
+                message.reply({ embeds: [help] });
+                break;
+
             case 'wl':
-                if (author.id !== process.env.OWNER_ID) return;
-                if (args[0] === 'add') {
-                    const u = message.mentions.users.first();
-                    if (!u || !args[2]) return message.reply("$wl add @user <cat>");
-                    if (!db.whitelist[u.id]) db.whitelist[u.id] = [];
-                    db.whitelist[u.id].push(args[2]); saveDB();
-                    message.reply({ embeds: [xEmbed(`Added **${u.tag}** to \`${args[2]}\``)] });
-                } else {
-                    const row = new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('wl_sel').setPlaceholder('Select Category').addOptions([{ label: 'Ban', value: 'ban' }, { label: 'Prefixless', value: 'prefixless' }, { label: 'Lock', value: 'lock' }]));
-                    message.reply({ components: [row] });
+                if (!isAdmin) return;
+                const sub = args[0];
+                if (sub === 'add') {
+                    const target = message.mentions.users.first();
+                    const cat = args[2];
+                    if (!target || !cat) return message.reply({ embeds: [createEmbed('Usage: $wl add @user <category>', false)] });
+                    db.prepare('INSERT OR REPLACE INTO whitelist VALUES (?, ?, ?)').run(guild.id, target.id, cat);
+                    message.reply({ embeds: [createEmbed(`Added **${target.tag}** to \`${cat}\``)] });
+                } else if (sub === 'remove') {
+                    const target = message.mentions.users.first();
+                    const cat = args[2];
+                    db.prepare('DELETE FROM whitelist WHERE guildId = ? AND userId = ? AND category = ?').run(guild.id, target.id, cat);
+                    message.reply({ embeds: [createEmbed(`Removed **${target.tag}** from \`${cat}\``)] });
+                } else if (sub === 'panel') {
+                    const row = new ActionRowBuilder().addComponents(
+                        new StringSelectMenuBuilder().setCustomId('wl_panel').setPlaceholder('Select Category').addOptions([
+                            { label: 'Ban', value: 'ban' }, { label: 'Mute', value: 'mute' }, 
+                            { label: 'Prefixless', value: 'prefixless' }, { label: 'Advertise', value: 'advertise' }, { label: 'Spam', value: 'spam' }
+                        ])
+                    );
+                    message.reply({ embeds: [createEmbed('Select a category to manage whitelist')], components: [row] });
+                } else if (sub === 'list') {
+                    const list = db.prepare('SELECT userId, category FROM whitelist WHERE guildId = ?').all(guild.id);
+                    const listTxt = list.map(l => `<@${l.userId}> - \`${l.category}\``).join('\n') || 'None';
+                    message.reply({ embeds: [new EmbedBuilder().setColor('#000000').setTitle('Whitelisted Users').setDescription(listTxt)] });
                 }
                 break;
 
-            // --- MODERATION ---
             case 'ban':
-                if (!isWL(author.id, 'ban') && !member.permissions.has(PermissionsBitField.Flags.BanMembers)) return;
-                const tu = message.mentions.members.first();
-                if (tu) await tu.ban();
-                message.reply({ embeds: [xEmbed("Banned successfully.")] });
+                const bUser = message.mentions.members.first() || guild.members.cache.get(args[0]);
+                if (!bUser) return message.reply({ embeds: [createEmbed('Mention a valid user', false)] });
+                await bUser.ban({ reason: args.slice(1).join(' ') || 'No reason' });
+                message.reply({ embeds: [createEmbed(`Banned **${bUser.user.tag}** successfully.`)] });
+                break;
+
+            case 'unban':
+                if (!args[0]) return message.reply({ embeds: [createEmbed('Provide a User ID', false)] });
+                await guild.members.unban(args[0]);
+                message.reply({ embeds: [createEmbed(`Unbanned \`${args[0]}\` successfully.`)] });
+                break;
+
+            case 'mute':
+                const mUser = message.mentions.members.first();
+                const time = args[1] || '10m';
+                const ms = require('util').promisify(setTimeout); // Dummy, use logic below
+                let duration = parseInt(time) * 60000;
+                if (time.endsWith('h')) duration = parseInt(time) * 3600000;
+                if (time.endsWith('d')) duration = parseInt(time) * 86400000;
+                await mUser.timeout(duration);
+                message.reply({ embeds: [createEmbed(`Muted **${mUser.user.tag}** for ${time}`)] });
+                break;
+
+            case 'unmute':
+                const umUser = message.mentions.members.first();
+                await umUser.timeout(null);
+                message.reply({ embeds: [createEmbed(`Unmuted **${umUser.user.tag}**`)] });
                 break;
 
             case 'lock':
-                if (!isWL(author.id, 'lock') && !member.permissions.has(PermissionsBitField.Flags.ManageChannels)) return;
                 await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false });
-                message.reply({ embeds: [xEmbed("Channel Locked.", 'lock')] });
+                message.reply({ embeds: [createEmbed('Locked channel for @everyone')] });
                 break;
 
             case 'unlock':
-                if (!isWL(author.id, 'lock') && !member.permissions.has(PermissionsBitField.Flags.ManageChannels)) return;
                 await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: true });
-                message.reply({ embeds: [xEmbed("Channel Unlocked.", 'success')] });
+                message.reply({ embeds: [createEmbed('Unlocked channel for @everyone')] });
                 break;
 
-            // --- MUSIC ---
-            case 'play':
-                if (!member.voice.channel) return message.reply("Join VC!");
-                const conn = joinVoiceChannel({ channelId: member.voice.channel.id, guildId: guild.id, adapterCreator: guild.voiceAdapterCreator });
-                const s = await play.stream(args.join(' '));
-                const res = createAudioResource(s.stream, { inputType: s.type });
-                const p = createAudioPlayer(); p.play(res); conn.subscribe(p);
-                message.reply({ embeds: [xEmbed(`Playing: **${args.join(' ')}**`, 'music')] });
+            case 'hide':
+                await channel.permissionOverwrites.edit(guild.roles.everyone, { ViewChannel: false });
+                message.reply({ embeds: [createEmbed('Hidden channel for @everyone')] });
                 break;
 
-            // --- GREET ---
-            case 'greet':
-                if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
-                if (args[0] === 'channel') {
-                    db.greet.welcomeChan = message.mentions.channels.first()?.id; saveDB();
-                    message.reply("Welcome channel set!");
-                } else if (args[0] === 'msg') {
-                    db.greet.welcomeMsg = args.slice(1).join(' '); saveDB();
-                    message.reply("Welcome message set!");
-                }
+            case 'unhide':
+                await channel.permissionOverwrites.edit(guild.roles.everyone, { ViewChannel: true });
+                message.reply({ embeds: [createEmbed('Shown channel for @everyone')] });
                 break;
 
-            // --- TICKET SETUP ---
-            case 'ticket-setup':
-                if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
-                const tEmbed = new EmbedBuilder().setColor('#000000').setTitle('Create a Ticket').setDescription('Click the button below to talk to staff.');
-                const tBtn = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('t_open').setLabel('Open Ticket').setStyle(ButtonStyle.Secondary).setEmoji('🎫'));
-                channel.send({ embeds: [tEmbed], components: [tBtn] });
+            case 'purge':
+                const amount = parseInt(args[0]);
+                if (isNaN(amount) || amount < 1 || amount > 100) return message.reply({ embeds: [createEmbed('Provide amount 1-100', false)] });
+                await channel.bulkDelete(amount, true);
+                channel.send({ embeds: [createEmbed(`Purged ${amount} messages`)] }).then(m => setTimeout(() => m.delete(), 3000));
                 break;
 
             case 'afk':
-                db.afk[author.id] = { reason: args.join(' ') || 'AFK', time: Date.now() }; saveDB();
-                message.reply({ embeds: [xEmbed("You are AFK now.", 'headphones')] });
+                const reason = args.join(' ') || 'AFK';
+                db.prepare('INSERT OR REPLACE INTO afk VALUES (?, ?, ?)').run(author.id, reason, Date.now());
+                message.reply({ embeds: [createEmbed(`AFK Enabled: ${reason}`)] });
+                break;
+
+            case 'play':
+                if (!member.voice.channel) return message.reply({ embeds: [createEmbed('Join a VC first', false)] });
+                const conn = joinVoiceChannel({ channelId: member.voice.channel.id, guildId: guild.id, adapterCreator: guild.voiceAdapterCreator });
+                const stream = await play.stream(args.join(' '));
+                const resource = createAudioResource(stream.stream, { inputType: stream.type });
+                const player = createAudioPlayer();
+                player.play(resource);
+                conn.subscribe(player);
+                players.set(guild.id, player);
+                message.reply({ embeds: [createEmbed(`Playing: **${args.join(' ')}**`)] });
+                break;
+
+            case 'stop':
+                const vConn = getVoiceConnection(guild.id);
+                if (vConn) vConn.destroy();
+                message.reply({ embeds: [createEmbed('Stopped and Left VC')] });
                 break;
         }
-    } catch (e) { console.error(e); }
+    } catch (err) {
+        console.error(err);
+        message.reply({ embeds: [createEmbed('Something went wrong. Check permissions.', false)] });
+    }
 });
 
-// --- INTERACTIONS ---
-client.on('interactionCreate', async (i) => {
-    if (i.isButton()) {
-        if (i.customId === 't_open') {
-            db.tickets.count++; saveDB();
-            const ch = await i.guild.channels.create({
-                name: `ticket-${db.tickets.count}`,
-                type: ChannelType.GuildText,
-                permissionOverwrites: [{ id: i.guild.id, deny: [PermissionsBitField.Flags.ViewChannel] }, { id: i.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }]
-            });
-            const closeBtn = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('t_close').setLabel('Close Ticket').setStyle(ButtonStyle.Danger));
-            ch.send({ content: `${i.user} Welcome to your ticket. Staff will be with you shortly.`, components: [closeBtn] });
-            i.reply({ content: `Ticket created: ${ch}`, ephemeral: true });
-        }
-        if (i.customId === 't_close') {
-            await i.reply("Closing ticket in 5 seconds...");
-            setTimeout(() => i.channel.delete(), 5000);
-        }
-    }
-    if (i.isStringSelectMenu() && i.customId === 'wl_sel') {
-        i.reply({ content: `Selected: ${i.values[0]}. Use \`$wl add @user ${i.values[0]}\``, ephemeral: true });
+client.on('interactionCreate', async (int) => {
+    if (int.isStringSelectMenu() && int.customId === 'wl_panel') {
+        await int.reply({ content: `Selected: **${int.values[0]}**. Use \`${PREFIX}wl add @user ${int.values[0]}\``, ephemeral: true });
     }
 });
 
