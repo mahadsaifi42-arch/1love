@@ -2,7 +2,7 @@ const {
     Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, 
     ActionRowBuilder, StringSelectMenuBuilder, Partials, ChannelType 
 } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection, AudioPlayerStatus } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection, AudioPlayerStatus, NoSubscriberBehavior } = require('@discordjs/voice');
 const play = require('play-dl');
 const express = require('express');
 const Database = require('better-sqlite3');
@@ -15,12 +15,11 @@ const db = new Database('bot.db');
 db.prepare('CREATE TABLE IF NOT EXISTS whitelist (guildId TEXT, userId TEXT, category TEXT, PRIMARY KEY(guildId, userId, category))').run();
 db.prepare('CREATE TABLE IF NOT EXISTS afk (userId TEXT PRIMARY KEY, reason TEXT, timestamp INTEGER)').run();
 
-// --- EXPRESS SERVER (Render Port Binding) ---
+// --- SERVER FOR RENDER ---
 const app = express();
 app.get('/', (req, res) => res.send('Bot is running ✅'));
 app.listen(process.env.PORT || 10000);
 
-// --- BOT CLIENT ---
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages,
@@ -32,9 +31,9 @@ const client = new Client({
 
 const PREFIX = process.env.PREFIX || '$';
 
-// --- HELPERS ---
-const successEmoji = '☑️';
-const errorEmoji = '❎';
+// --- CUSTOM EMOJIS ---
+const successEmoji = '<a:AG_ur_right:1458407389228175452>';
+const errorEmoji = '<a:4NDS_wrong:1460976888863391757>';
 
 const createEmbed = (text, isSuccess = true) => {
     return new EmbedBuilder()
@@ -47,20 +46,16 @@ const getWL = (guildId, userId) => {
     return rows.map(r => r.category);
 };
 
-// --- MUSIC HANDLER ---
-const players = new Map();
-
-// --- EVENTS ---
-client.on('ready', () => console.log(`${client.user.tag} is Online!`));
+client.on('ready', () => console.log(`${client.user.tag} is online!`));
 
 client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
-    // 1. AFK REMOVAL LOGIC
+    // 1. AFK REMOVAL (Hamesha active rahega)
     const afkData = db.prepare('SELECT * FROM afk WHERE userId = ?').get(message.author.id);
     if (afkData) {
         db.prepare('DELETE FROM afk WHERE userId = ?').run(message.author.id);
-        return message.reply({ embeds: [createEmbed(`Welcome back! AFK removed.`)] });
+        message.reply({ embeds: [createEmbed(`Welcome back! AFK removed.`)] });
     }
 
     // 2. AFK MENTION CHECK
@@ -74,135 +69,40 @@ client.on('messageCreate', async (message) => {
         });
     }
 
-    // 3. PARSING LOGIC
+    // 3. PARSING
     const userWL = getWL(message.guild.id, message.author.id);
     const isAdmin = message.member.permissions.has(PermissionsBitField.Flags.Administrator);
+    const content = message.content.trim();
     
     let command, args;
-    const prefixlessMods = ['ban', 'unban', 'mute', 'unmute', 'kick', 'lock', 'unlock', 'hide', 'unhide', 'purge'];
+    const prefixlessAllowed = ['ban', 'unban', 'mute', 'unmute', 'kick', 'lock', 'unlock', 'hide', 'unhide', 'purge', 'afk'];
 
-    if (message.content.startsWith(PREFIX)) {
-        args = message.content.slice(PREFIX.length).trim().split(/ +/);
+    if (content.startsWith(PREFIX)) {
+        args = content.slice(PREFIX.length).trim().split(/ +/);
         command = args.shift().toLowerCase();
     } else {
-        const firstWord = message.content.trim().split(/ +/)[0].toLowerCase();
-        if (prefixlessMods.includes(firstWord)) {
-            // Check if user is whitelisted for this specific command or has 'prefixless' cat
+        const firstWord = content.split(/ +/)[0].toLowerCase();
+        // AFK is prefixless for EVERYONE
+        if (firstWord === 'afk') {
+            args = content.split(/ +/).slice(1);
+            command = 'afk';
+        } 
+        // Others only for WL/Admins
+        else if (prefixlessAllowed.includes(firstWord)) {
             if (userWL.includes(firstWord) || userWL.includes('prefixless') || isAdmin) {
-                args = message.content.trim().split(/ +/);
-                command = args.shift().toLowerCase();
-            } else return; // Silent ignore
-        } else if (firstWord === 'afk') {
-            args = message.content.trim().split(/ +/);
-            command = args.shift().toLowerCase();
-        } else return; // Silent ignore
+                args = content.split(/ +/).slice(1);
+                command = firstWord;
+            } else return;
+        } else return;
     }
 
-    // --- COMMANDS ---
+    // --- COMMAND EXECUTION ---
     try {
-        const { member, channel, guild } = message;
+        const { member, channel, guild, author } = message;
 
         switch (command) {
             case 'ping':
                 message.reply({ embeds: [createEmbed(`Latency: \`${client.ws.ping}ms\``)] });
-                break;
-
-            case 'help':
-                const help = new EmbedBuilder().setColor('#000000').setTitle('Command List')
-                    .addFields(
-                        { name: 'Moderation', value: '`ban`, `unban`, `mute`, `unmute`, `kick`, `purge`', inline: true },
-                        { name: 'Channel', value: '`lock`, `unlock`, `hide`, `unhide`', inline: true },
-                        { name: 'Whitelist', value: '`wl add`, `wl remove`, `wl panel`, `wl list`', inline: true },
-                        { name: 'Music', value: '`play`, `stop`, `skip`, `pause`, `resume`', inline: true },
-                        { name: 'Utility', value: '`ping`, `afk`', inline: true }
-                    );
-                message.reply({ embeds: [help] });
-                break;
-
-            case 'wl':
-                if (!isAdmin) return;
-                const sub = args[0];
-                if (sub === 'add') {
-                    const target = message.mentions.users.first();
-                    const cat = args[2];
-                    if (!target || !cat) return message.reply({ embeds: [createEmbed('Usage: $wl add @user <category>', false)] });
-                    db.prepare('INSERT OR REPLACE INTO whitelist VALUES (?, ?, ?)').run(guild.id, target.id, cat);
-                    message.reply({ embeds: [createEmbed(`Added **${target.tag}** to \`${cat}\``)] });
-                } else if (sub === 'remove') {
-                    const target = message.mentions.users.first();
-                    const cat = args[2];
-                    db.prepare('DELETE FROM whitelist WHERE guildId = ? AND userId = ? AND category = ?').run(guild.id, target.id, cat);
-                    message.reply({ embeds: [createEmbed(`Removed **${target.tag}** from \`${cat}\``)] });
-                } else if (sub === 'panel') {
-                    const row = new ActionRowBuilder().addComponents(
-                        new StringSelectMenuBuilder().setCustomId('wl_panel').setPlaceholder('Select Category').addOptions([
-                            { label: 'Ban', value: 'ban' }, { label: 'Mute', value: 'mute' }, 
-                            { label: 'Prefixless', value: 'prefixless' }, { label: 'Advertise', value: 'advertise' }, { label: 'Spam', value: 'spam' }
-                        ])
-                    );
-                    message.reply({ embeds: [createEmbed('Select a category to manage whitelist')], components: [row] });
-                } else if (sub === 'list') {
-                    const list = db.prepare('SELECT userId, category FROM whitelist WHERE guildId = ?').all(guild.id);
-                    const listTxt = list.map(l => `<@${l.userId}> - \`${l.category}\``).join('\n') || 'None';
-                    message.reply({ embeds: [new EmbedBuilder().setColor('#000000').setTitle('Whitelisted Users').setDescription(listTxt)] });
-                }
-                break;
-
-            case 'ban':
-                const bUser = message.mentions.members.first() || guild.members.cache.get(args[0]);
-                if (!bUser) return message.reply({ embeds: [createEmbed('Mention a valid user', false)] });
-                await bUser.ban({ reason: args.slice(1).join(' ') || 'No reason' });
-                message.reply({ embeds: [createEmbed(`Banned **${bUser.user.tag}** successfully.`)] });
-                break;
-
-            case 'unban':
-                if (!args[0]) return message.reply({ embeds: [createEmbed('Provide a User ID', false)] });
-                await guild.members.unban(args[0]);
-                message.reply({ embeds: [createEmbed(`Unbanned \`${args[0]}\` successfully.`)] });
-                break;
-
-            case 'mute':
-                const mUser = message.mentions.members.first();
-                const time = args[1] || '10m';
-                const ms = require('util').promisify(setTimeout); // Dummy, use logic below
-                let duration = parseInt(time) * 60000;
-                if (time.endsWith('h')) duration = parseInt(time) * 3600000;
-                if (time.endsWith('d')) duration = parseInt(time) * 86400000;
-                await mUser.timeout(duration);
-                message.reply({ embeds: [createEmbed(`Muted **${mUser.user.tag}** for ${time}`)] });
-                break;
-
-            case 'unmute':
-                const umUser = message.mentions.members.first();
-                await umUser.timeout(null);
-                message.reply({ embeds: [createEmbed(`Unmuted **${umUser.user.tag}**`)] });
-                break;
-
-            case 'lock':
-                await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false });
-                message.reply({ embeds: [createEmbed('Locked channel for @everyone')] });
-                break;
-
-            case 'unlock':
-                await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: true });
-                message.reply({ embeds: [createEmbed('Unlocked channel for @everyone')] });
-                break;
-
-            case 'hide':
-                await channel.permissionOverwrites.edit(guild.roles.everyone, { ViewChannel: false });
-                message.reply({ embeds: [createEmbed('Hidden channel for @everyone')] });
-                break;
-
-            case 'unhide':
-                await channel.permissionOverwrites.edit(guild.roles.everyone, { ViewChannel: true });
-                message.reply({ embeds: [createEmbed('Shown channel for @everyone')] });
-                break;
-
-            case 'purge':
-                const amount = parseInt(args[0]);
-                if (isNaN(amount) || amount < 1 || amount > 100) return message.reply({ embeds: [createEmbed('Provide amount 1-100', false)] });
-                await channel.bulkDelete(amount, true);
-                channel.send({ embeds: [createEmbed(`Purged ${amount} messages`)] }).then(m => setTimeout(() => m.delete(), 3000));
                 break;
 
             case 'afk':
@@ -212,32 +112,97 @@ client.on('messageCreate', async (message) => {
                 break;
 
             case 'play':
-                if (!member.voice.channel) return message.reply({ embeds: [createEmbed('Join a VC first', false)] });
-                const conn = joinVoiceChannel({ channelId: member.voice.channel.id, guildId: guild.id, adapterCreator: guild.voiceAdapterCreator });
-                const stream = await play.stream(args.join(' '));
-                const resource = createAudioResource(stream.stream, { inputType: stream.type });
-                const player = createAudioPlayer();
-                player.play(resource);
-                conn.subscribe(player);
-                players.set(guild.id, player);
-                message.reply({ embeds: [createEmbed(`Playing: **${args.join(' ')}**`)] });
+                if (!member.voice.channel) return message.reply({ embeds: [createEmbed('Join a Voice Channel first!', false)] });
+                
+                // Connection Fix
+                const connection = joinVoiceChannel({
+                    channelId: member.voice.channel.id,
+                    guildId: guild.id,
+                    adapterCreator: guild.voiceAdapterCreator,
+                    selfDeaf: true
+                });
+
+                const query = args.join(' ');
+                if (!query) return message.reply({ embeds: [createEmbed('Provide a song name/link', false)] });
+
+                try {
+                    const search = await play.search(query, { limit: 1 });
+                    if (search.length === 0) return message.reply({ embeds: [createEmbed('No results found', false)] });
+
+                    const stream = await play.stream(search[0].url);
+                    const resource = createAudioResource(stream.stream, { inputType: stream.type });
+                    const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
+
+                    player.play(resource);
+                    connection.subscribe(player);
+
+                    message.reply({ embeds: [createEmbed(`Started playing: **${search[0].title}**`)] });
+                } catch (err) {
+                    message.reply({ embeds: [createEmbed('Could not play music. Try a different link.', false)] });
+                }
                 break;
 
             case 'stop':
                 const vConn = getVoiceConnection(guild.id);
-                if (vConn) vConn.destroy();
-                message.reply({ embeds: [createEmbed('Stopped and Left VC')] });
+                if (vConn) {
+                    vConn.destroy();
+                    message.reply({ embeds: [createEmbed('Left the voice channel.')] });
+                } else {
+                    message.reply({ embeds: [createEmbed('I am not in a voice channel.', false)] });
+                }
+                break;
+
+            case 'wl':
+                if (!isAdmin) return;
+                if (args[0] === 'add') {
+                    const target = message.mentions.users.first();
+                    const cat = args[2];
+                    if (!target || !cat) return message.reply({ embeds: [createEmbed('Usage: $wl add @user <category>', false)] });
+                    db.prepare('INSERT OR REPLACE INTO whitelist VALUES (?, ?, ?)').run(guild.id, target.id, cat);
+                    message.reply({ embeds: [createEmbed(`Added **${target.tag}** to \`${cat}\``)] });
+                } else if (args[0] === 'panel') {
+                    const row = new ActionRowBuilder().addComponents(
+                        new StringSelectMenuBuilder().setCustomId('wl_panel').setPlaceholder('Whitelist Categories').addOptions([
+                            { label: 'Ban', value: 'ban' }, { label: 'Prefixless', value: 'prefixless' }, { label: 'Lock', value: 'lock' }
+                        ])
+                    );
+                    message.reply({ embeds: [createEmbed('Choose a category')], components: [row] });
+                }
+                break;
+
+            case 'ban':
+                const bUser = message.mentions.members.first();
+                if (!bUser) return message.reply({ embeds: [createEmbed('Mention a valid user', false)] });
+                await bUser.ban();
+                message.reply({ embeds: [createEmbed(`Banned **${bUser.user.tag}**`)] });
+                break;
+
+            case 'lock':
+                await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false });
+                message.reply({ embeds: [createEmbed('Channel Locked.')] });
+                break;
+
+            case 'unlock':
+                await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: true });
+                message.reply({ embeds: [createEmbed('Channel Unlocked.')] });
+                break;
+
+            case 'purge':
+                const amount = parseInt(args[0]);
+                if (isNaN(amount) || amount < 1 || amount > 100) return message.reply({ embeds: [createEmbed('Provide 1-100', false)] });
+                await channel.bulkDelete(amount, true);
+                channel.send({ embeds: [createEmbed(`Purged ${amount} messages`)] }).then(m => setTimeout(() => m.delete(), 3000));
                 break;
         }
     } catch (err) {
         console.error(err);
-        message.reply({ embeds: [createEmbed('Something went wrong. Check permissions.', false)] });
+        message.reply({ embeds: [createEmbed('Error: Check my permissions/role position.', false)] });
     }
 });
 
 client.on('interactionCreate', async (int) => {
     if (int.isStringSelectMenu() && int.customId === 'wl_panel') {
-        await int.reply({ content: `Selected: **${int.values[0]}**. Use \`${PREFIX}wl add @user ${int.values[0]}\``, ephemeral: true });
+        await int.reply({ content: `Selected: **${int.values[0]}**. Now use: \`${PREFIX}wl add @user ${int.values[0]}\``, ephemeral: true });
     }
 });
 
