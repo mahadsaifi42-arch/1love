@@ -2,7 +2,7 @@ const {
     Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, 
     ActionRowBuilder, StringSelectMenuBuilder, Partials, ChannelType 
 } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection, AudioPlayerStatus, NoSubscriberBehavior } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection, NoSubscriberBehavior } = require('@discordjs/voice');
 const play = require('play-dl');
 const express = require('express');
 const Database = require('better-sqlite3');
@@ -10,23 +10,26 @@ const dotenv = require('dotenv');
 
 dotenv.config();
 
-// --- DATABASE SETUP ---
+// --- DATABASE ---
 const db = new Database('bot.db');
 db.prepare('CREATE TABLE IF NOT EXISTS whitelist (guildId TEXT, userId TEXT, category TEXT, PRIMARY KEY(guildId, userId, category))').run();
 db.prepare('CREATE TABLE IF NOT EXISTS afk (userId TEXT PRIMARY KEY, reason TEXT, timestamp INTEGER)').run();
 
-// --- SERVER FOR RENDER ---
+// --- WEB SERVER (For Render) ---
 const app = express();
-app.get('/', (req, res) => res.send('Bot is running ✅'));
+app.get('/', (req, res) => res.send('Bot is Online ✅'));
 app.listen(process.env.PORT || 10000);
 
+// --- BOT CLIENT SETUP ---
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildVoiceStates
     ],
-    partials: [Partials.Message, Partials.Channel]
+    partials: [Partials.Message, Partials.Channel],
+    // --- GLOBAL MENTION FIX: Isse reply pe ping nahi aayega ---
+    allowedMentions: { repliedUser: false, parse: ['users', 'roles'] }
 });
 
 const PREFIX = process.env.PREFIX || '$';
@@ -46,30 +49,30 @@ const getWL = (guildId, userId) => {
     return rows.map(r => r.category);
 };
 
-client.on('ready', () => console.log(`${client.user.tag} is online!`));
+client.once('ready', () => console.log(`${client.user.tag} is online!`));
 
 client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
-    // 1. AFK REMOVAL (Hamesha active rahega)
+    // 1. AFK REMOVAL
     const afkData = db.prepare('SELECT * FROM afk WHERE userId = ?').get(message.author.id);
     if (afkData) {
         db.prepare('DELETE FROM afk WHERE userId = ?').run(message.author.id);
         message.reply({ embeds: [createEmbed(`Welcome back! AFK removed.`)] });
     }
 
-    // 2. AFK MENTION CHECK
+    // 2. AFK MENTION ALERT
     if (message.mentions.users.size > 0) {
         message.mentions.users.forEach(u => {
             const data = db.prepare('SELECT * FROM afk WHERE userId = ?').get(u.id);
             if (data) {
                 const timeAgo = Math.floor((Date.now() - data.timestamp) / 60000);
-                message.reply({ embeds: [createEmbed(`${u.tag} is AFK: ${data.reason} (${timeAgo}m ago)`, false)] });
+                message.reply({ embeds: [createEmbed(`${u.tag} is AFK: **${data.reason}** (${timeAgo}m ago)`, false)] });
             }
         });
     }
 
-    // 3. PARSING
+    // 3. COMMAND PARSING
     const userWL = getWL(message.guild.id, message.author.id);
     const isAdmin = message.member.permissions.has(PermissionsBitField.Flags.Administrator);
     const content = message.content.trim();
@@ -82,12 +85,12 @@ client.on('messageCreate', async (message) => {
         command = args.shift().toLowerCase();
     } else {
         const firstWord = content.split(/ +/)[0].toLowerCase();
-        // AFK is prefixless for EVERYONE
+        // AFK is for everyone (No Prefix)
         if (firstWord === 'afk') {
             args = content.split(/ +/).slice(1);
             command = 'afk';
         } 
-        // Others only for WL/Admins
+        // Mod commands only for WL
         else if (prefixlessAllowed.includes(firstWord)) {
             if (userWL.includes(firstWord) || userWL.includes('prefixless') || isAdmin) {
                 args = content.split(/ +/).slice(1);
@@ -96,7 +99,7 @@ client.on('messageCreate', async (message) => {
         } else return;
     }
 
-    // --- COMMAND EXECUTION ---
+    // --- COMMANDS ---
     try {
         const { member, channel, guild, author } = message;
 
@@ -112,9 +115,8 @@ client.on('messageCreate', async (message) => {
                 break;
 
             case 'play':
-                if (!member.voice.channel) return message.reply({ embeds: [createEmbed('Join a Voice Channel first!', false)] });
+                if (!member.voice.channel) return message.reply({ embeds: [createEmbed('Join a VC first!', false)] });
                 
-                // Connection Fix
                 const connection = joinVoiceChannel({
                     channelId: member.voice.channel.id,
                     guildId: guild.id,
@@ -125,31 +127,22 @@ client.on('messageCreate', async (message) => {
                 const query = args.join(' ');
                 if (!query) return message.reply({ embeds: [createEmbed('Provide a song name/link', false)] });
 
-                try {
-                    const search = await play.search(query, { limit: 1 });
-                    if (search.length === 0) return message.reply({ embeds: [createEmbed('No results found', false)] });
+                const search = await play.search(query, { limit: 1 });
+                if (search.length === 0) return message.reply({ embeds: [createEmbed('No results found', false)] });
 
-                    const stream = await play.stream(search[0].url);
-                    const resource = createAudioResource(stream.stream, { inputType: stream.type });
-                    const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
+                const stream = await play.stream(search[0].url);
+                const resource = createAudioResource(stream.stream, { inputType: stream.type });
+                const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
 
-                    player.play(resource);
-                    connection.subscribe(player);
-
-                    message.reply({ embeds: [createEmbed(`Started playing: **${search[0].title}**`)] });
-                } catch (err) {
-                    message.reply({ embeds: [createEmbed('Could not play music. Try a different link.', false)] });
-                }
+                player.play(resource);
+                connection.subscribe(player);
+                message.reply({ embeds: [createEmbed(`Playing: **${search[0].title}**`)] });
                 break;
 
             case 'stop':
                 const vConn = getVoiceConnection(guild.id);
-                if (vConn) {
-                    vConn.destroy();
-                    message.reply({ embeds: [createEmbed('Left the voice channel.')] });
-                } else {
-                    message.reply({ embeds: [createEmbed('I am not in a voice channel.', false)] });
-                }
+                if (vConn) vConn.destroy();
+                message.reply({ embeds: [createEmbed('Left the voice channel.')] });
                 break;
 
             case 'wl':
@@ -162,7 +155,7 @@ client.on('messageCreate', async (message) => {
                     message.reply({ embeds: [createEmbed(`Added **${target.tag}** to \`${cat}\``)] });
                 } else if (args[0] === 'panel') {
                     const row = new ActionRowBuilder().addComponents(
-                        new StringSelectMenuBuilder().setCustomId('wl_panel').setPlaceholder('Whitelist Categories').addOptions([
+                        new StringSelectMenuBuilder().setCustomId('wl_panel').setPlaceholder('Select Category').addOptions([
                             { label: 'Ban', value: 'ban' }, { label: 'Prefixless', value: 'prefixless' }, { label: 'Lock', value: 'lock' }
                         ])
                     );
@@ -172,31 +165,31 @@ client.on('messageCreate', async (message) => {
 
             case 'ban':
                 const bUser = message.mentions.members.first();
-                if (!bUser) return message.reply({ embeds: [createEmbed('Mention a valid user', false)] });
+                if (!bUser) return message.reply({ embeds: [createEmbed('Mention a user', false)] });
                 await bUser.ban();
                 message.reply({ embeds: [createEmbed(`Banned **${bUser.user.tag}**`)] });
                 break;
 
             case 'lock':
                 await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false });
-                message.reply({ embeds: [createEmbed('Channel Locked.')] });
+                message.reply({ embeds: [createEmbed('Channel Locked.', true)] });
                 break;
 
             case 'unlock':
                 await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: true });
-                message.reply({ embeds: [createEmbed('Channel Unlocked.')] });
+                message.reply({ embeds: [createEmbed('Channel Unlocked.', true)] });
                 break;
 
             case 'purge':
-                const amount = parseInt(args[0]);
-                if (isNaN(amount) || amount < 1 || amount > 100) return message.reply({ embeds: [createEmbed('Provide 1-100', false)] });
-                await channel.bulkDelete(amount, true);
-                channel.send({ embeds: [createEmbed(`Purged ${amount} messages`)] }).then(m => setTimeout(() => m.delete(), 3000));
+                const num = parseInt(args[0]);
+                if (isNaN(num) || num < 1 || num > 100) return message.reply({ embeds: [createEmbed('1-100 only', false)] });
+                await channel.bulkDelete(num, true);
+                channel.send({ embeds: [createEmbed(`Purged ${num} messages`)] }).then(m => setTimeout(() => m.delete(), 3000));
                 break;
         }
     } catch (err) {
         console.error(err);
-        message.reply({ embeds: [createEmbed('Error: Check my permissions/role position.', false)] });
+        message.reply({ embeds: [createEmbed('Missing Permissions/Error', false)] });
     }
 });
 
