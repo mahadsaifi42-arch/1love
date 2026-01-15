@@ -120,6 +120,40 @@ const permMap = {
 const modCmds = Object.keys(permMap);
 
 // ===================== WHITELIST HELPERS =====================
+const alias = {
+  j: "join",
+  join: "join",
+  dc: "leave",
+  disconnect: "leave",
+  leave: "leave",
+
+  p: "play",
+  play: "play",
+
+  s: "skip",
+  skip: "skip",
+
+  st: "stop",
+  stop: "stop",
+
+  ps: "pause",
+  pause: "pause",
+
+  rs: "resume",
+  resume: "resume",
+
+  lp: "loop",
+  loop: "loop",
+
+  sh: "shuffle",
+  shuffle: "shuffle",
+
+  q: "queue",
+  queue: "queue",
+
+  np: "np",
+  nowplaying: "np",
+};
 function getUserWhitelist(guildId, userId) {
   return db
     .prepare("SELECT category FROM whitelist WHERE guildId = ? AND userId = ?")
@@ -236,7 +270,7 @@ client.on("messageCreate", async (message) => {
         return; // ignore normal chat
       }
     }
-
+cmd = alias[cmd] || cmd;
     // ===================== BASIC COMMANDS =====================
     if (cmd === "ping") {
       return safeReply(message, {
