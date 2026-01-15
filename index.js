@@ -58,10 +58,10 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN || "";
 
 // ====================== XLARE LOOK ======================
 const EMOJI = {
-  ok: "☑️",
-  no: "❎",
-  lock: "🔒",
-  music: "🎵",
+  ok: "<a:AG_ur_right:1458407389228175452>",
+  no: "<a:B_ERROR:1316750242389037057>",
+  lock: "<a:lock_keyggchillhaven:1460976890981650526>",
+  music: "<a:Music:1460976894194352192>",
 };
 
 function xEmbed(title, desc, ok = true) {
