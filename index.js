@@ -123,6 +123,7 @@ const modCmds = Object.keys(permMap);
 const alias = {
   j: "join",
   join: "join",
+ 
   dc: "leave",
   disconnect: "leave",
   leave: "leave",
@@ -271,6 +272,30 @@ client.on("messageCreate", async (message) => {
       }
     }
 cmd = alias[cmd] || cmd;
+    if (cmd === "join" || cmd === "j") {
+  if (!member.voice.channel) {
+    return message.reply({ embeds: [xEmbed("Error", "Join a voice channel first.", false)] });
+  }
+
+  joinVoiceChannel({
+    channelId: member.voice.channel.id,
+    guildId: guild.id,
+    adapterCreator: guild.voiceAdapterCreator,
+    selfDeaf: true
+  });
+
+  return message.reply({ embeds: [xEmbed("Connected", `Joined **${member.voice.channel.name}**`, true)] });
+}
+
+if (cmd === "disconnect" || cmd === "dc") {
+  const conn = getVoiceConnection(guild.id);
+  if (!conn) {
+    return message.reply({ embeds: [xEmbed("Error", "I'm not connected in any VC.", false)] });
+  }
+
+  conn.destroy();
+  return message.reply({ embeds: [xEmbed("Disconnected", "Left the voice channel.", true)] });
+}
     // ===================== BASIC COMMANDS =====================
     if (cmd === "ping") {
       return safeReply(message, {
