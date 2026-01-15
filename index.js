@@ -55,8 +55,8 @@ const client = new Client({
 });
 
 // ===================== STYLE =====================
-const tick = "☑️";
-const cross = "❎";
+const tick = "<a:AG_ur_right:1458407389228175452>";
+const cross = "<a:4NDS_wrong:1460976888863391757>";
 
 // no mention anywhere in replies
 const NO_MENTION = { repliedUser: false, parse: [] };
@@ -695,12 +695,12 @@ client.on("interactionCreate", async (i) => {
     const isOwner = i.user.id === OWNER_ID;
     const isAdmin = i.member.permissions.has(PermissionsBitField.Flags.Administrator);
     if (!isOwner && !isAdmin) {
-      return i.reply({ content: "❎ No Permission", ephemeral: true });
+      return i.reply({ content: "<a:4NDS_wrong:1460976888863391757> No Permission", ephemeral: true });
     }
 
     const selected = i.values[0];
     return i.reply({
-      content: `☑️ Selected: **${selected}**\nNow use: \`${PREFIX}wl add @user ${selected}\``,
+      content: `<a:AG_ur_right:1458407389228175452> Selected: **${selected}**\nNow use: \`${PREFIX}wl add @user ${selected}\``,
       ephemeral: true,
     });
   } catch (e) {
