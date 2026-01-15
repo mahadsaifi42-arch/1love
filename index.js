@@ -1,496 +1,293 @@
-require("dotenv").config();
-
 const {
   Client,
   GatewayIntentBits,
-  Partials,
-  PermissionsBitField,
   EmbedBuilder,
+  PermissionsBitField,
   ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
   StringSelectMenuBuilder,
+  Partials,
 } = require("discord.js");
-
-const express = require("express");
-const Database = require("better-sqlite3");
 
 const {
   joinVoiceChannel,
-  getVoiceConnection,
   createAudioPlayer,
   createAudioResource,
+  getVoiceConnection,
   AudioPlayerStatus,
   NoSubscriberBehavior,
   StreamType,
 } = require("@discordjs/voice");
 
 const play = require("play-dl");
-const sodium = require("libsodium-wrappers");
-const ffmpegPath = require("ffmpeg-static");
+const express = require("express");
+const Database = require("better-sqlite3");
+require("dotenv").config();
 
-// =================== CONFIG ===================
-const PREFIX = "$";
-const OWNER_ID = process.env.OWNER_ID || ""; // put your discord id in .env
-const TOKEN = process.env.TOKEN;
+// ====================== DATABASE ======================
+const db = new Database("bot.db");
 
-const EMBED_COLOR = 0x000000; // black
+db.prepare(
+  "CREATE TABLE IF NOT EXISTS whitelist (guildId TEXT, userId TEXT, category TEXT, PRIMARY KEY(guildId, userId, category))"
+).run();
 
-// Emojis (fix + clean)
-const EMOJI = {
-  ok: "✅",
-  no: "❌",
-  lock: "🔒",
-  unlock: "🔓",
-  hide: "🙈",
-  unhide: "👁️",
-  add: "➕",
-  remove: "➖",
-  music: "🎵",
-  info: "ℹ️",
-  warn: "⚠️",
-  ping: "🏓",
-  list: "📜",
-  user: "👤",
-};
+db.prepare(
+  "CREATE TABLE IF NOT EXISTS afk (userId TEXT PRIMARY KEY, reason TEXT, timestamp INTEGER)"
+).run();
 
-// =================== EXPRESS (Render keep alive) ===================
+// ====================== RENDER SERVER ======================
 const app = express();
-app.get("/", (req, res) => res.send("1Love bot is alive!"));
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Web server running on ${PORT}`));
+app.get("/", (req, res) => res.send("Bot is Secure & Online ✅"));
+app.listen(process.env.PORT || 10000);
 
-// =================== DATABASE ===================
-const db = new Database("database.sqlite");
-
-// whitelist table
-db.prepare(
-  `CREATE TABLE IF NOT EXISTS whitelist (
-    guildId TEXT NOT NULL,
-    userId TEXT NOT NULL,
-    category TEXT NOT NULL,
-    PRIMARY KEY (guildId, userId, category)
-  )`
-).run();
-
-// afk table
-db.prepare(
-  `CREATE TABLE IF NOT EXISTS afk (
-    guildId TEXT NOT NULL,
-    userId TEXT NOT NULL,
-    reason TEXT,
-    time INTEGER,
-    PRIMARY KEY (guildId, userId)
-  )`
-).run();
-
-// autoresponse table
-db.prepare(
-  `CREATE TABLE IF NOT EXISTS autoreply (
-    guildId TEXT NOT NULL,
-    trigger TEXT NOT NULL,
-    reply TEXT NOT NULL,
-    PRIMARY KEY (guildId, trigger)
-  )`
-).run();
-
-// reaction role table
-db.prepare(
-  `CREATE TABLE IF NOT EXISTS reaction_roles (
-    guildId TEXT NOT NULL,
-    channelId TEXT NOT NULL,
-    messageId TEXT NOT NULL,
-    emoji TEXT NOT NULL,
-    roleId TEXT NOT NULL,
-    PRIMARY KEY (guildId, messageId, emoji)
-  )`
-).run();
-
-// greet table
-db.prepare(
-  `CREATE TABLE IF NOT EXISTS greet (
-    guildId TEXT NOT NULL PRIMARY KEY,
-    channelId TEXT,
-    message TEXT
-  )`
-).run();
-
-// =================== CLIENT ===================
+// ====================== BOT ======================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMessageReactions,
   ],
-  partials: [Partials.Message, Partials.Channel, Partials.Reaction],
+  partials: [Partials.Message, Partials.Channel],
+  allowedMentions: { repliedUser: false }, // mention off
 });
 
-// =================== HELPERS ===================
+const PREFIX = process.env.PREFIX || "$";
+const OWNER_ID = process.env.OWNER_ID || "";
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN || "";
+
+// ====================== XLARE LOOK ======================
+const EMOJI = {
+  ok: "☑️",
+  no: "❎",
+  lock: "🔒",
+  music: "🎵",
+};
+
 function xEmbed(title, desc, ok = true) {
   return new EmbedBuilder()
-    .setColor(EMBED_COLOR)
+    .setColor("#000000")
     .setTitle(`${ok ? EMOJI.ok : EMOJI.no} ${title}`)
-    .setDescription(desc || "‎");
+    .setDescription(desc);
 }
 
-async function safeReply(message, payload) {
-  // no mention reply
+function safeReply(message, payload) {
   return message.reply({
-    allowedMentions: { repliedUser: false },
     ...payload,
+    allowedMentions: { repliedUser: false },
   });
 }
 
-function isOwner(authorId) {
-  return OWNER_ID && authorId === OWNER_ID;
-}
+// ====================== PERMISSION MAP ======================
+const permMap = {
+  ban: { flag: PermissionsBitField.Flags.BanMembers, name: "Ban Members" },
+  unban: { flag: PermissionsBitField.Flags.BanMembers, name: "Ban Members" },
+  kick: { flag: PermissionsBitField.Flags.KickMembers, name: "Kick Members" },
+  mute: { flag: PermissionsBitField.Flags.ModerateMembers, name: "Moderate Members" },
+  unmute: { flag: PermissionsBitField.Flags.ModerateMembers, name: "Moderate Members" },
+  lock: { flag: PermissionsBitField.Flags.ManageChannels, name: "Manage Channels" },
+  unlock: { flag: PermissionsBitField.Flags.ManageChannels, name: "Manage Channels" },
+  hide: { flag: PermissionsBitField.Flags.ManageChannels, name: "Manage Channels" },
+  unhide: { flag: PermissionsBitField.Flags.ManageChannels, name: "Manage Channels" },
+  purge: { flag: PermissionsBitField.Flags.ManageMessages, name: "Manage Messages" },
+};
 
-function isAdmin(member) {
-  return member.permissions.has(PermissionsBitField.Flags.Administrator);
-}
+const modCmds = Object.keys(permMap);
 
+// ====================== WHITELIST HELPERS ======================
 function getUserWhitelist(guildId, userId) {
   return db
-    .prepare("SELECT category FROM whitelist WHERE guildId=? AND userId=?")
+    .prepare("SELECT category FROM whitelist WHERE guildId = ? AND userId = ?")
     .all(guildId, userId)
     .map((r) => r.category);
 }
 
-// prefixless moderation allowed only if user is whitelisted in that category
-function canUsePrefixlessMod(member, guildId, cmd) {
-  if (!member) return false;
-  if (isOwner(member.id)) return true;
-  if (isAdmin(member)) return true;
+function canUsePrefixless(member, guildId, cmd) {
+  // Owner/Admin always allowed
+  const isOwner = member.id === OWNER_ID;
+  const isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator);
+  if (isOwner || isAdmin) return true;
 
-  const list = getUserWhitelist(guildId, member.id);
-
-  // categories: ban, mute, lock, hide, prefixless
-  if (list.includes("prefixless")) return true;
-
-  if (["ban", "unban", "kick"].includes(cmd)) return list.includes("ban");
-  if (["mute", "unmute"].includes(cmd)) return list.includes("mute");
-  if (["lock", "unlock"].includes(cmd)) return list.includes("lock");
-  if (["hide", "unhide"].includes(cmd)) return list.includes("hide");
-
-  // music prefixless can be allowed by "prefixless" only
-  if (["j", "join", "dc", "disconnect", "play", "p", "skip", "stop", "pause", "resume", "loop", "shuffle", "queue", "q", "np"].includes(cmd)) {
-    return list.includes("prefixless");
-  }
-
-  return false;
+  const wl = getUserWhitelist(guildId, member.id);
+  // allow if user has exact cmd OR "prefixless"
+  return wl.includes(cmd) || wl.includes("prefixless");
 }
 
-function hasDiscordPermission(member, cmd) {
-  const map = {
-    ban: PermissionsBitField.Flags.BanMembers,
-    unban: PermissionsBitField.Flags.BanMembers,
-    kick: PermissionsBitField.Flags.KickMembers,
-    mute: PermissionsBitField.Flags.ModerateMembers,
-    unmute: PermissionsBitField.Flags.ModerateMembers,
-    purge: PermissionsBitField.Flags.ManageMessages,
-    lock: PermissionsBitField.Flags.ManageChannels,
-    unlock: PermissionsBitField.Flags.ManageChannels,
-    hide: PermissionsBitField.Flags.ManageChannels,
-    unhide: PermissionsBitField.Flags.ManageChannels,
-  };
-  const perm = map[cmd];
-  if (!perm) return true;
-  return member.permissions.has(perm);
-}
-
-function parseUserId(str) {
-  if (!str) return null;
-  const m = str.match(/^<@!?(\d+)>$/);
-  if (m) return m[1];
-  if (/^\d{15,25}$/.test(str)) return str;
-  return null;
-}
-
-async function ensureVoiceConnection(guild, member) {
-  if (!member.voice.channel) return null;
-
-  let conn = getVoiceConnection(guild.id);
-  if (!conn) {
-    conn = joinVoiceChannel({
-      channelId: member.voice.channel.id,
-      guildId: guild.id,
-      adapterCreator: guild.voiceAdapterCreator,
-      selfDeaf: true,
-    });
-  }
-  return conn;
-}
-
-// =================== MUSIC STATE ===================
-const music = new Map(); // guildId => { queue:[], player, connection, loop, nowPlaying }
+// ====================== MUSIC SYSTEM ======================
+const musicState = new Map();
+// guildId => { queue: [], player, connection, loop, nowPlaying }
 
 function getGuildMusic(guildId) {
-  if (!music.has(guildId)) {
+  if (!musicState.has(guildId)) {
     const player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
 
-    music.set(guildId, {
+    musicState.set(guildId, {
       queue: [],
       player,
       connection: null,
       loop: false,
       nowPlaying: null,
+      playing: false,
+    });
+
+    player.on(AudioPlayerStatus.Idle, async () => {
+      const state = musicState.get(guildId);
+      if (!state) return;
+
+      if (state.loop && state.nowPlaying) {
+        // replay same track
+        await playTrack(guildId, state.nowPlaying).catch(() => {});
+        return;
+      }
+
+      // next track
+      state.nowPlaying = null;
+      state.playing = false;
+      playNext(guildId).catch(() => {});
+    });
+
+    player.on("error", (err) => {
+      console.log("Music Player Error:", err?.message);
+      const state = musicState.get(guildId);
+      if (state) {
+        state.nowPlaying = null;
+        state.playing = false;
+      }
+      playNext(guildId).catch(() => {});
     });
   }
-  return music.get(guildId);
+  return musicState.get(guildId);
 }
 
-async function playNext(guild, message) {
-  const gm = getGuildMusic(guild.id);
-
-  if (!gm.queue.length) {
-    gm.nowPlaying = null;
-    return;
+async function ensureVC(message) {
+  const { guild, member } = message;
+  if (!member.voice.channel) {
+    await safeReply(message, {
+      embeds: [xEmbed("Error", "Join a voice channel first.", false)],
+    });
+    return null;
   }
 
-  const track = gm.queue[0];
-  gm.nowPlaying = track;
+  const state = getGuildMusic(guild.id);
+
+  if (!state.connection) {
+    state.connection = joinVoiceChannel({
+      channelId: member.voice.channel.id,
+      guildId: guild.id,
+      adapterCreator: guild.voiceAdapterCreator,
+      selfDeaf: true,
+    });
+
+    state.connection.subscribe(state.player);
+  }
+
+  return state;
+}
+
+async function playTrack(guildId, track) {
+  const state = getGuildMusic(guildId);
+  state.nowPlaying = track;
+  state.playing = true;
+
+  // stream using play-dl
+  const stream = await play.stream(track.url);
+  const resource = createAudioResource(stream.stream, {
+    inputType: stream.type || StreamType.Arbitrary,
+  });
+
+  state.player.play(resource);
+}
+
+async function playNext(guildId) {
+  const state = getGuildMusic(guildId);
+  if (!state) return;
+  if (state.playing) return;
+
+  const next = state.queue.shift();
+  if (!next) return;
 
   try {
-    // youtube stream
-    const ytInfo = await play.video_basic_info(track.url);
-    const stream = await play.stream_from_info(ytInfo, { quality: 2 });
-
-    const resource = createAudioResource(stream.stream, {
-      inputType: stream.type || StreamType.Arbitrary,
-      inlineVolume: true,
-    });
-    resource.volume.setVolume(1.0);
-
-    gm.player.play(resource);
-
-    await safeReply(message, {
-      embeds: [
-        xEmbed(
-          "Now Playing",
-          `${EMOJI.music} **${track.title}**\n🔗 ${track.url}`,
-          true
-        ),
-      ],
-    });
+    await playTrack(guildId, next);
   } catch (e) {
-    console.log("Music error:", e);
-    gm.queue.shift();
-    return safeReply(message, {
-      embeds: [xEmbed("Error", "Failed to play this track. Skipping...", false)],
-    }).then(() => playNext(guild, message));
+    console.log("Failed to play track:", e?.message);
+    state.nowPlaying = null;
+    state.playing = false;
+    // skip to next
+    await playNext(guildId);
   }
 }
 
-// =================== READY ===================
-client.once("ready", async () => {
-  await sodium.ready;
-  console.log(`${client.user.tag} is online!`);
+function shuffleArray(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
 
-  // attach idle listener per guild music
-  client.guilds.cache.forEach((g) => {
-    const gm = getGuildMusic(g.id);
+// ====================== READY ======================
+client.on("ready", async () => {
+  console.log(`✅ ${client.user.tag} Online`);
 
-    gm.player.on(AudioPlayerStatus.Idle, async () => {
-      if (!gm.queue.length) return;
+  // Optional: YouTube cookie (fixes many "Failed to play" issues)
+  if (process.env.YT_COOKIE) {
+    try {
+      await play.setToken({
+        youtube: { cookie: process.env.YT_COOKIE },
+      });
+      console.log("✅ YT_COOKIE Loaded");
+    } catch (e) {
+      console.log("❎ YT_COOKIE Failed:", e?.message);
+    }
+  } else {
+    console.log("⚠️ No YT_COOKIE (music may fail sometimes on Render)");
+  }
+});
 
-      // if loop off => remove current
-      if (!gm.loop) gm.queue.shift();
+// ====================== INTERACTIONS (WL MENU) ======================
+client.on("interactionCreate", async (i) => {
+  if (!i.isStringSelectMenu()) return;
+  if (i.customId !== "wl_menu") return;
 
-      // play next
-      const textCh =
-        g.systemChannel ||
-        g.channels.cache.find((c) => c.isTextBased && c.isTextBased());
-      if (!textCh) return;
+  const isOwner = i.user.id === OWNER_ID;
+  const isAdmin = i.member.permissions.has(PermissionsBitField.Flags.Administrator);
+  if (!isOwner && !isAdmin) {
+    return i.reply({ content: "No Permission", ephemeral: true });
+  }
 
-      const fakeMsg = {
-        guild: g,
-        channel: textCh,
-        reply: (p) => textCh.send({ allowedMentions: { repliedUser: false }, ...p }),
-      };
-
-      await playNext(g, fakeMsg);
-    });
-
-    gm.player.on("error", (err) => {
-      console.log("Player error:", err);
-    });
+  return i.reply({
+    content: `Selected: **${i.values[0]}**\nNow use:\n\`${PREFIX}wl add @user ${i.values[0]}\``,
+    ephemeral: true,
   });
 });
 
-// =================== GUILD MEMBER ADD (WELCOME) ===================
-client.on("guildMemberAdd", async (member) => {
-  const row = db.prepare("SELECT * FROM greet WHERE guildId=?").get(member.guild.id);
-  if (!row || !row.channelId) return;
-
-  const ch = member.guild.channels.cache.get(row.channelId);
-  if (!ch || !ch.isTextBased()) return;
-
-  const msg = (row.message || "Welcome {user}!")
-    .replaceAll("{user}", `<@${member.id}>`)
-    .replaceAll("{server}", member.guild.name);
-
-  ch.send({ content: msg, allowedMentions: { users: [] } });
-});
-
-// =================== MESSAGE CREATE ===================
+// ====================== MESSAGE CREATE ======================
 client.on("messageCreate", async (message) => {
   try {
-    if (!message.guild) return;
-    if (message.author.bot) return;
+    if (message.author.bot || !message.guild) return;
 
-    const guild = message.guild;
-    const member = await guild.members.fetch(message.author.id);
+    const { content, guild, member, author } = message;
+    const text = content.trim();
 
-    const text = message.content.trim();
-
-    // ---------- AFK REMOVE ON MESSAGE ----------
-    const afkRow = db
-      .prepare("SELECT * FROM afk WHERE guildId=? AND userId=?")
-      .get(guild.id, message.author.id);
-
-    if (afkRow) {
-      db.prepare("DELETE FROM afk WHERE guildId=? AND userId=?").run(
-        guild.id,
-        message.author.id
-      );
-      safeReply(message, {
-        embeds: [xEmbed("AFK Removed", "Welcome back!", true)],
-      });
+    // ====================== AFK SYSTEM ======================
+    const myAfk = db.prepare("SELECT * FROM afk WHERE userId = ?").get(author.id);
+    if (myAfk) {
+      db.prepare("DELETE FROM afk WHERE userId = ?").run(author.id);
+      await safeReply(message, { embeds: [xEmbed("Welcome Back", "AFK removed.", true)] });
     }
 
-    // ---------- AFK PING CHECK ----------
-    if (message.mentions.users.size) {
-      for (const [uid] of message.mentions.users) {
-        const row = db
-          .prepare("SELECT * FROM afk WHERE guildId=? AND userId=?")
-          .get(guild.id, uid);
-        if (row) {
-          const since = `<t:${Math.floor(row.time / 1000)}:R>`;
-          safeReply(message, {
+    if (message.mentions.users.size > 0) {
+      for (const u of message.mentions.users.values()) {
+        const afkData = db.prepare("SELECT * FROM afk WHERE userId = ?").get(u.id);
+        if (afkData) {
+          await safeReply(message, {
             embeds: [
               xEmbed(
-                "AFK",
-                `${EMOJI.info} <@${uid}> is AFK\n**Reason:** ${row.reason || "No reason"}\n**Since:** ${since}`,
-                true
-              ),
-            ],
-          });
-        }
-      }
-    }
-
-    // ---------- AUTO REPLY ----------
-    const ar = db
-      .prepare("SELECT reply FROM autoreply WHERE guildId=? AND trigger=?")
-      .get(guild.id, text.toLowerCase());
-    if (ar?.reply) {
-      return message.channel.send({
-        content: ar.reply,
-        allowedMentions: { parse: [] },
-      });
-    }
-
-    // =================== COMMAND PARSING ===================
-    let cmd = null;
-    let args = [];
-    let isPrefixless = false;
-
-    // aliases
-    const alias = {
-      j: "join",
-      dc: "disconnect",
-      d: "disconnect",
-      p: "play",
-      q: "queue",
-      np: "np",
-    };
-
-    const modCmds = [
-      "ban",
-      "unban",
-      "kick",
-      "mute",
-      "unmute",
-      "purge",
-      "lock",
-      "unlock",
-      "hide",
-      "unhide",
-    ];
-
-    const musicCmds = [
-      "join",
-      "disconnect",
-      "play",
-      "skip",
-      "stop",
-      "pause",
-      "resume",
-      "loop",
-      "shuffle",
-      "queue",
-      "np",
-    ];
-
-    // PREFIX commands
-    if (text.startsWith(PREFIX)) {
-      const sliced = text.slice(PREFIX.length).trim();
-      if (!sliced) return;
-
-      args = sliced.split(/\s+/);
-      cmd = (args.shift() || "").toLowerCase();
-      cmd = alias[cmd] || cmd;
-      isPrefixless = false;
-    } else {
-      // PREFIXLESS: only AFK public OR whitelisted mod/music
-      const first = text.split(/\s+/)[0]?.toLowerCase();
-      const rest = text.split(/\s+/).slice(1);
-
-      // AFK public prefixless
-      if (first === "afk") {
-        cmd = "afk";
-        args = rest;
-        isPrefixless = true;
-      } else if ([...modCmds, ...musicCmds].includes(alias[first] || first)) {
-        cmd = alias[first] || first;
-        args = rest;
-        isPrefixless = true;
-      } else {
-        return; // ignore normal chat
-      }
-    }
-
-    // =================== SECURITY VALIDATION ===================
-    // If command is moderation/music and prefixless => require whitelist/admin/owner
-    if (isPrefixless && (modCmds.includes(cmd) || musicCmds.includes(cmd))) {
-      const allowed = canUsePrefixlessMod(member, guild.id, cmd);
-      if (!allowed) {
-        return safeReply(message, {
-          embeds: [
-            xEmbed(
-              "Not Whitelisted",
-              `You are not allowed to use prefixless **${cmd}**.`,
-              false
-            ),
-          ],
-        });
-      }
-    }
-
-    // For moderation commands always require Discord permissions unless owner/admin
-    if (modCmds.includes(cmd)) {
-      if (!isOwner(message.author.id) && !isAdmin(member)) {
-        if (!hasDiscordPermission(member, cmd)) {
-          return safeReply(message, {
-            embeds: [
-              xEmbed(
-                "No Permission",
-                `You need proper Discord permission to use **${cmd}**.`,
+                "User is AFK",
+                `Reason: **${afkData.reason}**\nSince: <t:${Math.floor(
+                  afkData.timestamp / 1000
+                )}:R>`,
                 false
               ),
             ],
@@ -499,17 +296,106 @@ client.on("messageCreate", async (message) => {
       }
     }
 
-    // =================== COMMANDS ===================
-    // ---- BASIC ----
+    // ====================== ALIASES ======================
+    const alias = {
+      // music short cmds
+      j: "join",
+      dc: "disconnect",
+      p: "play",
+      s: "skip",
+      st: "stop",
+      ps: "pause",
+      rs: "resume",
+      lp: "loop",
+      sh: "shuffle",
+      q: "queue",
+      np: "nowplaying",
+    };
+
+    // ====================== COMMAND PARSE ======================
+    let cmd = null;
+    let args = [];
+    let isPrefixless = false;
+
+    // Prefix commands
+    if (text.startsWith(PREFIX)) {
+      const sliced = text.slice(PREFIX.length).trim();
+      if (!sliced) return;
+      args = sliced.split(/\s+/);
+      cmd = (args.shift() || "").toLowerCase();
+      isPrefixless = false;
+    } else {
+      // Prefixless only for AFK + modCmds + music shortcuts (whitelisted)
+      const first = text.split(/\s+/)[0].toLowerCase();
+
+      // AFK is public prefixless
+      if (first === "afk") {
+        cmd = "afk";
+        args = text.split(/\s+/).slice(1);
+        isPrefixless = true;
+      } else if (
+        modCmds.includes(first) ||
+        ["join", "disconnect", "play", "skip", "stop", "pause", "resume", "loop", "shuffle", "queue", "nowplaying"].includes(first) ||
+        Object.keys(alias).includes(first)
+      ) {
+        cmd = first;
+        args = text.split(/\s+/).slice(1);
+        isPrefixless = true;
+      } else {
+        return; // ignore normal chat
+      }
+    }
+
+    // alias apply
+    cmd = alias[cmd] || cmd;
+
+    const isOwner = author.id === OWNER_ID;
+    const isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator);
+
+    // ====================== SECURITY LAYER (STRICT) ======================
+    // Moderation commands always require Discord permissions
+    if (modCmds.includes(cmd)) {
+      const cfg = permMap[cmd];
+
+      // Owner/Admin bypass
+      if (!isOwner && !isAdmin) {
+        // must have discord permission
+        if (!member.permissions.has(cfg.flag)) {
+          return safeReply(message, {
+            embeds: [xEmbed("No Permission", `You need **${cfg.name}** permission.`, false)],
+          });
+        }
+
+        // prefixless requires whitelist
+        if (isPrefixless) {
+          const allowed = canUsePrefixless(member, guild.id, cmd);
+          if (!allowed) {
+            return safeReply(message, {
+              embeds: [xEmbed("Not Whitelisted", `You can't use prefixless **${cmd}**.`, false)],
+            });
+          }
+        }
+      }
+    }
+
+    // Music prefixless requires whitelist too (except owner/admin)
+    const musicCmds = ["join", "disconnect", "play", "skip", "stop", "pause", "resume", "loop", "shuffle", "queue", "nowplaying"];
+    if (musicCmds.includes(cmd)) {
+      if (isPrefixless && !isOwner && !isAdmin) {
+        const allowed = canUsePrefixless(member, guild.id, "prefixless");
+        if (!allowed) {
+          return safeReply(message, {
+            embeds: [xEmbed("Not Whitelisted", "You can't use prefixless music commands.", false)],
+          });
+        }
+      }
+    }
+
+    // ====================== COMMANDS ======================
+    // Basic
     if (cmd === "ping") {
       return safeReply(message, {
-        embeds: [
-          xEmbed(
-            "Pong!",
-            `${EMOJI.ping} Latency: **${client.ws.ping}ms**`,
-            true
-          ),
-        ],
+        embeds: [xEmbed("Pong!", `Latency: \`${client.ws.ping}ms\``, true)],
       });
     }
 
@@ -521,310 +407,192 @@ client.on("messageCreate", async (message) => {
             `**Prefix:** \`${PREFIX}\`
 
 **Moderation**
-\`${PREFIX}ban @user [reason]\`
-\`${PREFIX}unban <userId>\`
-\`${PREFIX}kick @user [reason]\`
-\`${PREFIX}mute @user [minutes]\`
-\`${PREFIX}unmute @user\`
-\`${PREFIX}purge 1-100\`
-
-**Channel**
+\`${PREFIX}ban @user\`
+\`${PREFIX}mute @user 10\`
 \`${PREFIX}lock\` / \`${PREFIX}unlock\`
 \`${PREFIX}hide\` / \`${PREFIX}unhide\`
 
 **Whitelist**
 \`${PREFIX}wl\` (panel)
 \`${PREFIX}wl add @user <category>\`
-\`${PREFIX}wl remove @user <category>\`
 \`${PREFIX}wl list\`
 
 **AFK**
-\`${PREFIX}afk [reason]\`
-\`afk [reason]\` (prefixless public)
+\`${PREFIX}afk reason\`
+\`afk reason\` (public)
 
 **Music**
-\`${PREFIX}j\` / \`${PREFIX}join\`
-\`${PREFIX}dc\`
+\`${PREFIX}join\` / \`${PREFIX}dc\`
 \`${PREFIX}play <name/url>\`
-\`${PREFIX}skip\`
-\`${PREFIX}stop\`
-\`${PREFIX}pause\`
-\`${PREFIX}resume\`
-\`${PREFIX}loop\`
-\`${PREFIX}shuffle\`
-\`${PREFIX}q\`
-\`${PREFIX}np\`
-
-**Prefixless for whitelisted users**
-\`ban/mute/lock/hide/j/dc/play...\``,
+\`${PREFIX}skip\` \`${PREFIX}stop\`
+\`${PREFIX}pause\` \`${PREFIX}resume\`
+\`${PREFIX}loop\` \`${PREFIX}shuffle\`
+\`${PREFIX}queue\` \`${PREFIX}np\`
+`,
             true
           ),
         ],
       });
     }
 
-    // ---- WHITELIST ----
+    // AFK
+    if (cmd === "afk") {
+      const reason = args.join(" ") || "AFK";
+      db.prepare("INSERT OR REPLACE INTO afk VALUES (?, ?, ?)").run(author.id, reason, Date.now());
+      return safeReply(message, {
+        embeds: [xEmbed("AFK Enabled", `Reason: **${reason}**`, true)],
+      });
+    }
+
+    // Whitelist
     if (cmd === "wl") {
+      if (!isOwner && !isAdmin) return;
+
       const sub = (args[0] || "").toLowerCase();
 
-      // only owner/admin can manage wl
-      if (!isOwner(message.author.id) && !isAdmin(member)) {
-        return safeReply(message, {
-          embeds: [xEmbed("No Permission", "Only Admin/Owner can use whitelist panel.", false)],
-        });
-      }
-
-      if (!sub || sub === "panel") {
-        const menu = new StringSelectMenuBuilder()
-          .setCustomId("wl_select")
-          .setPlaceholder("Select whitelist category")
-          .addOptions([
-            { label: "ban", value: "ban", description: "Ban/Kick/Unban prefixless" },
-            { label: "mute", value: "mute", description: "Mute/Unmute prefixless" },
-            { label: "lock", value: "lock", description: "Lock/Unlock prefixless" },
-            { label: "hide", value: "hide", description: "Hide/Unhide prefixless" },
-            { label: "prefixless", value: "prefixless", description: "All prefixless commands" },
-          ]);
-
-        const row = new ActionRowBuilder().addComponents(menu);
-
-        return safeReply(message, {
-          embeds: [
-            xEmbed(
-              "Whitelist Panel",
-              `${EMOJI.list} Choose a category, then use:
-\`${PREFIX}wl add @user <category>\`
-\`${PREFIX}wl remove @user <category>\``,
-              true
-            ),
-          ],
-          components: [row],
-        });
-      }
-
       if (sub === "add") {
-        const userId = parseUserId(args[1]);
+        const target = message.mentions.users.first();
         const category = (args[2] || "").toLowerCase();
 
-        if (!userId || !category) {
+        if (!target || !category) {
           return safeReply(message, {
-            embeds: [xEmbed("Usage", `${PREFIX}wl add @user <ban/mute/lock/hide/prefixless>`, false)],
+            embeds: [xEmbed("Error", `Usage: \`${PREFIX}wl add @user <category>\``, false)],
           });
         }
 
-        const allowedCats = ["ban", "mute", "lock", "hide", "prefixless"];
-        if (!allowedCats.includes(category)) {
-          return safeReply(message, {
-            embeds: [xEmbed("Invalid Category", `Allowed: ${allowedCats.join(", ")}`, false)],
-          });
-        }
-
-        db.prepare("INSERT OR IGNORE INTO whitelist (guildId,userId,category) VALUES (?,?,?)").run(
-          guild.id,
-          userId,
-          category
-        );
-
+        db.prepare("INSERT OR REPLACE INTO whitelist VALUES (?, ?, ?)").run(guild.id, target.id, category);
         return safeReply(message, {
-          embeds: [
-            xEmbed(
-              "Whitelisted",
-              `${EMOJI.ok} Added <@${userId}> to **${category}** whitelist.`,
-              true
-            ),
-          ],
-        });
-      }
-
-      if (sub === "remove") {
-        const userId = parseUserId(args[1]);
-        const category = (args[2] || "").toLowerCase();
-
-        if (!userId || !category) {
-          return safeReply(message, {
-            embeds: [xEmbed("Usage", `${PREFIX}wl remove @user <ban/mute/lock/hide/prefixless>`, false)],
-          });
-        }
-
-        db.prepare("DELETE FROM whitelist WHERE guildId=? AND userId=? AND category=?").run(
-          guild.id,
-          userId,
-          category
-        );
-
-        return safeReply(message, {
-          embeds: [
-            xEmbed(
-              "Removed",
-              `${EMOJI.remove} Removed <@${userId}> from **${category}** whitelist.`,
-              true
-            ),
-          ],
+          embeds: [xEmbed("Whitelisted", `Added **${target.tag}** to **${category}**`, true)],
         });
       }
 
       if (sub === "list") {
         const rows = db
-          .prepare("SELECT userId, category FROM whitelist WHERE guildId=?")
+          .prepare("SELECT userId, category FROM whitelist WHERE guildId = ?")
           .all(guild.id);
 
         if (!rows.length) {
           return safeReply(message, { embeds: [xEmbed("Whitelist", "No users whitelisted.", true)] });
         }
 
-        const grouped = {};
-        for (const r of rows) {
-          if (!grouped[r.userId]) grouped[r.userId] = [];
-          grouped[r.userId].push(r.category);
-        }
+        const textList = rows
+          .map((r) => `• <@${r.userId}> → **${r.category}**`)
+          .slice(0, 30)
+          .join("\n");
 
-        let out = "";
-        for (const uid of Object.keys(grouped)) {
-          out += `${EMOJI.user} <@${uid}> → **${grouped[uid].join(", ")}**\n`;
-        }
-
-        return safeReply(message, { embeds: [xEmbed("Whitelist List", out, true)] });
+        return safeReply(message, {
+          embeds: [xEmbed("Whitelist", textList, true)],
+        });
       }
-    }
 
-    // ---- AFK ----
-    if (cmd === "afk") {
-      const reason = args.join(" ").trim() || "AFK";
-      db.prepare("INSERT OR REPLACE INTO afk (guildId,userId,reason,time) VALUES (?,?,?,?)").run(
-        guild.id,
-        message.author.id,
-        reason,
-        Date.now()
+      // panel
+      const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId("wl_menu")
+          .setPlaceholder("Select Category")
+          .addOptions([
+            { label: "Ban", value: "ban" },
+            { label: "Mute", value: "mute" },
+            { label: "Lock", value: "lock" },
+            { label: "Unlock", value: "unlock" },
+            { label: "Hide", value: "hide" },
+            { label: "Unhide", value: "unhide" },
+            { label: "Prefixless (ALL)", value: "prefixless" },
+          ])
       );
 
       return safeReply(message, {
-        embeds: [xEmbed("AFK Enabled", `Reason: **${reason}**`, true)],
+        embeds: [xEmbed("Whitelist Panel", "Select a category from menu.", true)],
+        components: [row],
       });
     }
 
-    // ---- MODERATION ----
+    // ====================== MODERATION ======================
     if (cmd === "ban") {
-      const userId = parseUserId(args[0]);
-      const reason = args.slice(1).join(" ") || "No reason";
-      if (!userId) return safeReply(message, { embeds: [xEmbed("Usage", `${PREFIX}ban @user [reason]`, false)] });
+      const target = message.mentions.members.first() || guild.members.cache.get(args[0]);
+      if (!target) {
+        return safeReply(message, { embeds: [xEmbed("Error", "Mention user or provide ID.", false)] });
+      }
 
-      const target = await guild.members.fetch(userId).catch(() => null);
-      if (!target) return safeReply(message, { embeds: [xEmbed("Error", "Invalid user.", false)] });
+      if (!target.bannable) {
+        return safeReply(message, { embeds: [xEmbed("Error", "I can't ban this user (role higher than me).", false)] });
+      }
 
-      if (!target.bannable) return safeReply(message, { embeds: [xEmbed("Error", "I can't ban this user.", false)] });
+      // hierarchy check (member vs target)
+      if (!isOwner && target.roles.highest.position >= member.roles.highest.position) {
+        return safeReply(message, { embeds: [xEmbed("Error", "Role hierarchy error.", false)] });
+      }
 
-      await target.ban({ reason });
-      return safeReply(message, { embeds: [xEmbed("Banned", `${EMOJI.ok} Banned <@${userId}>\nReason: **${reason}**`, true)] });
-    }
-
-    if (cmd === "unban") {
-      const userId = parseUserId(args[0]);
-      if (!userId) return safeReply(message, { embeds: [xEmbed("Usage", `${PREFIX}unban <userId>`, false)] });
-
-      await guild.bans.remove(userId).catch(() => null);
-      return safeReply(message, { embeds: [xEmbed("Unbanned", `${EMOJI.ok} Unbanned **${userId}**`, true)] });
-    }
-
-    if (cmd === "kick") {
-      const userId = parseUserId(args[0]);
-      const reason = args.slice(1).join(" ") || "No reason";
-      if (!userId) return safeReply(message, { embeds: [xEmbed("Usage", `${PREFIX}kick @user [reason]`, false)] });
-
-      const target = await guild.members.fetch(userId).catch(() => null);
-      if (!target) return safeReply(message, { embeds: [xEmbed("Error", "Invalid user.", false)] });
-
-      if (!target.kickable) return safeReply(message, { embeds: [xEmbed("Error", "I can't kick this user.", false)] });
-
-      await target.kick(reason);
-      return safeReply(message, { embeds: [xEmbed("Kicked", `${EMOJI.ok} Kicked <@${userId}>\nReason: **${reason}**`, true)] });
+      await target.ban({ reason: `Banned by ${author.tag}` });
+      return safeReply(message, { embeds: [xEmbed("Banned", `**${target.user.tag}** banned successfully.`, true)] });
     }
 
     if (cmd === "mute") {
-      const userId = parseUserId(args[0]);
+      const target = message.mentions.members.first() || guild.members.cache.get(args[0]);
+      if (!target) {
+        return safeReply(message, { embeds: [xEmbed("Error", "Mention user or provide ID.", false)] });
+      }
+
+      if (!target.moderatable) {
+        return safeReply(message, { embeds: [xEmbed("Error", "I can't mute this user (role higher than me).", false)] });
+      }
+
       const minutes = parseInt(args[1] || "10");
-      if (!userId) return safeReply(message, { embeds: [xEmbed("Usage", `${PREFIX}mute @user [minutes]`, false)] });
+      const durationMs = (isNaN(minutes) ? 10 : minutes) * 60 * 1000;
 
-      const target = await guild.members.fetch(userId).catch(() => null);
-      if (!target) return safeReply(message, { embeds: [xEmbed("Error", "Invalid user.", false)] });
-
-      const ms = Math.max(1, minutes) * 60 * 1000;
-      await target.timeout(ms, "Muted by bot");
-      return safeReply(message, { embeds: [xEmbed("Muted", `${EMOJI.ok} Muted <@${userId}> for **${minutes} min**`, true)] });
+      await target.timeout(durationMs, `Muted by ${author.tag}`);
+      return safeReply(message, {
+        embeds: [xEmbed("Muted", `Muted **${target.user.tag}** for **${minutes}m**`, true)],
+      });
     }
 
     if (cmd === "unmute") {
-      const userId = parseUserId(args[0]);
-      if (!userId) return safeReply(message, { embeds: [xEmbed("Usage", `${PREFIX}unmute @user`, false)] });
-
-      const target = await guild.members.fetch(userId).catch(() => null);
-      if (!target) return safeReply(message, { embeds: [xEmbed("Error", "Invalid user.", false)] });
-
-      await target.timeout(null);
-      return safeReply(message, { embeds: [xEmbed("Unmuted", `${EMOJI.ok} Unmuted <@${userId}>`, true)] });
-    }
-
-    if (cmd === "purge") {
-      const amount = parseInt(args[0] || "0");
-      if (!amount || amount < 1 || amount > 100) {
-        return safeReply(message, { embeds: [xEmbed("Usage", `${PREFIX}purge 1-100`, false)] });
+      const target = message.mentions.members.first() || guild.members.cache.get(args[0]);
+      if (!target) {
+        return safeReply(message, { embeds: [xEmbed("Error", "Mention user or provide ID.", false)] });
       }
-      await message.channel.bulkDelete(amount, true).catch(() => null);
-      return safeReply(message, { embeds: [xEmbed("Purged", `${EMOJI.ok} Deleted **${amount}** messages.`, true)] });
+
+      await target.timeout(null, `Unmuted by ${author.tag}`);
+      return safeReply(message, {
+        embeds: [xEmbed("Unmuted", `Unmuted **${target.user.tag}**`, true)],
+      });
     }
 
-    // ---- CHANNEL LOCK/HIDE @everyone ----
     if (cmd === "lock") {
-      await message.channel.permissionOverwrites.edit(guild.roles.everyone, {
-        SendMessages: false,
-      });
-
-      return safeReply(message, {
-        embeds: [xEmbed("Locked", `${EMOJI.lock} Channel locked for **@everyone**.`, true)],
-      });
+      await message.channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false });
+      return safeReply(message, { embeds: [xEmbed("Locked", "Channel locked for **@everyone**.", true)] });
     }
 
     if (cmd === "unlock") {
-      await message.channel.permissionOverwrites.edit(guild.roles.everyone, {
-        SendMessages: null,
-      });
-
-      return safeReply(message, {
-        embeds: [xEmbed("Unlocked", `${EMOJI.unlock} Channel unlocked for **@everyone**.`, true)],
-      });
+      await message.channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: true });
+      return safeReply(message, { embeds: [xEmbed("Unlocked", "Channel unlocked for **@everyone**.", true)] });
     }
 
     if (cmd === "hide") {
-      await message.channel.permissionOverwrites.edit(guild.roles.everyone, {
-        ViewChannel: false,
-      });
-
-      return safeReply(message, {
-        embeds: [xEmbed("Hidden", `${EMOJI.hide} Channel hidden for **@everyone**.`, true)],
-      });
+      await message.channel.permissionOverwrites.edit(guild.roles.everyone, { ViewChannel: false });
+      return safeReply(message, { embeds: [xEmbed("Hidden", "Channel hidden for **@everyone**.", true)] });
     }
 
     if (cmd === "unhide") {
-      await message.channel.permissionOverwrites.edit(guild.roles.everyone, {
-        ViewChannel: null,
-      });
-
-      return safeReply(message, {
-        embeds: [xEmbed("Unhidden", `${EMOJI.unhide} Channel visible for **@everyone**.`, true)],
-      });
+      await message.channel.permissionOverwrites.edit(guild.roles.everyone, { ViewChannel: true });
+      return safeReply(message, { embeds: [xEmbed("Unhidden", "Channel visible for **@everyone**.", true)] });
     }
 
-    // ---- MUSIC ----
-    const gm = getGuildMusic(guild.id);
-
-    if (cmd === "join") {
-      if (!member.voice.channel) {
-        return safeReply(message, { embeds: [xEmbed("Error", "Join a voice channel first.", false)] });
+    if (cmd === "purge") {
+      const amt = parseInt(args[0]);
+      if (isNaN(amt) || amt < 1 || amt > 100) {
+        return safeReply(message, { embeds: [xEmbed("Error", "Amount must be 1-100", false)] });
       }
+      await message.channel.bulkDelete(amt, true);
+      const m = await message.channel.send({ embeds: [xEmbed("Purged", `Deleted **${amt}** messages.`, true)] });
+      setTimeout(() => m.delete().catch(() => {}), 3000);
+      return;
+    }
 
-      const conn = await ensureVoiceConnection(guild, member);
-      gm.connection = conn;
-      conn.subscribe(gm.player);
-
+    // ====================== MUSIC ======================
+    if (cmd === "join") {
+      const state = await ensureVC(message);
+      if (!state) return;
       return safeReply(message, {
         embeds: [xEmbed("Connected", `Joined **${member.voice.channel.name}**`, true)],
       });
@@ -832,214 +600,150 @@ client.on("messageCreate", async (message) => {
 
     if (cmd === "disconnect") {
       const conn = getVoiceConnection(guild.id);
-      if (!conn) return safeReply(message, { embeds: [xEmbed("Error", "I'm not connected in any VC.", false)] });
-
+      if (!conn) {
+        return safeReply(message, { embeds: [xEmbed("Error", "I'm not connected in any VC.", false)] });
+      }
       conn.destroy();
-      gm.queue = [];
-      gm.nowPlaying = null;
+      const state = getGuildMusic(guild.id);
+      state.queue = [];
+      state.nowPlaying = null;
+      state.playing = false;
+      state.connection = null;
 
-      return safeReply(message, {
-        embeds: [xEmbed("Disconnected", "Left the voice channel.", true)],
-      });
+      return safeReply(message, { embeds: [xEmbed("Disconnected", "Left the voice channel.", true)] });
     }
 
     if (cmd === "play") {
       const query = args.join(" ");
-      if (!query) return safeReply(message, { embeds: [xEmbed("Usage", `${PREFIX}play <song name/url>`, false)] });
-
-      if (!member.voice.channel) {
-        return safeReply(message, { embeds: [xEmbed("Error", "Join a voice channel first.", false)] });
+      if (!query) {
+        return safeReply(message, {
+          embeds: [xEmbed("Error", `Usage: \`${PREFIX}play <song name/url>\``, false)],
+        });
       }
 
-      const conn = await ensureVoiceConnection(guild, member);
-      gm.connection = conn;
-      conn.subscribe(gm.player);
+      const state = await ensureVC(message);
+      if (!state) return;
 
-      let video;
-      try {
-        if (play.yt_validate(query) === "video") {
-          const info = await play.video_basic_info(query);
-          video = info.video_details;
-        } else {
-          const results = await play.search(query, { limit: 1 });
-          if (!results.length) {
-            return safeReply(message, { embeds: [xEmbed("Error", "No results found.", false)] });
-          }
-          video = results[0];
+      let result = null;
+
+      // if URL
+      if (play.yt_validate(query) === "video") {
+        const info = await play.video_basic_info(query);
+        result = {
+          title: info.video_details.title,
+          url: info.video_details.url,
+        };
+      } else {
+        const search = await play.search(query, { limit: 1 });
+        if (!search.length) {
+          return safeReply(message, { embeds: [xEmbed("Error", "No results found.", false)] });
         }
-      } catch (e) {
-        console.log("Search error:", e);
-        return safeReply(message, { embeds: [xEmbed("Error", "Search failed.", false)] });
+        result = { title: search[0].title, url: search[0].url };
       }
 
-      const track = {
-        title: video.title || "Unknown",
-        url: video.url,
-        requestedBy: message.author.id,
-      };
-
-      gm.queue.push(track);
+      state.queue.push(result);
 
       await safeReply(message, {
         embeds: [
           xEmbed(
             "Added to Queue",
-            `${EMOJI.music} **${track.title}**\n🔗 ${track.url}`,
+            `${EMOJI.music} **${result.title}**\n🔗 ${result.url}`,
             true
           ),
         ],
       });
 
-      // if not playing start
-      if (gm.player.state.status !== AudioPlayerStatus.Playing) {
-        return playNext(guild, message);
+      // start if not playing
+      if (!state.playing && !state.nowPlaying) {
+        await playNext(guild.id);
       }
+
       return;
     }
 
     if (cmd === "skip") {
-      if (!gm.queue.length) return safeReply(message, { embeds: [xEmbed("Error", "Queue is empty.", false)] });
-
-      gm.queue.shift();
-      gm.player.stop(true);
-
+      const state = getGuildMusic(guild.id);
+      if (!state.connection) {
+        return safeReply(message, { embeds: [xEmbed("Error", "I'm not in VC.", false)] });
+      }
+      state.player.stop();
       return safeReply(message, { embeds: [xEmbed("Skipped", "Skipped current track.", true)] });
     }
 
     if (cmd === "stop") {
-      gm.queue = [];
-      gm.nowPlaying = null;
-      gm.player.stop(true);
-
+      const state = getGuildMusic(guild.id);
+      state.queue = [];
+      state.loop = false;
+      state.player.stop();
       return safeReply(message, { embeds: [xEmbed("Stopped", "Stopped music & cleared queue.", true)] });
     }
 
     if (cmd === "pause") {
-      gm.player.pause();
-      return safeReply(message, { embeds: [xEmbed("Paused", "Music paused.", true)] });
+      const state = getGuildMusic(guild.id);
+      state.player.pause();
+      return safeReply(message, { embeds: [xEmbed("Paused", "Paused playback.", true)] });
     }
 
     if (cmd === "resume") {
-      gm.player.unpause();
-      return safeReply(message, { embeds: [xEmbed("Resumed", "Music resumed.", true)] });
+      const state = getGuildMusic(guild.id);
+      state.player.unpause();
+      return safeReply(message, { embeds: [xEmbed("Resumed", "Resumed playback.", true)] });
     }
 
     if (cmd === "loop") {
-      gm.loop = !gm.loop;
+      const state = getGuildMusic(guild.id);
+      state.loop = !state.loop;
       return safeReply(message, {
-        embeds: [xEmbed("Loop", `Loop is now **${gm.loop ? "ON" : "OFF"}**`, true)],
+        embeds: [xEmbed("Loop", `Loop is now: **${state.loop ? "ON" : "OFF"}**`, true)],
       });
     }
 
     if (cmd === "shuffle") {
-      if (gm.queue.length < 2) return safeReply(message, { embeds: [xEmbed("Error", "Not enough tracks to shuffle.", false)] });
-
-      const first = gm.queue[0];
-      const rest = gm.queue.slice(1);
-
-      for (let i = rest.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [rest[i], rest[j]] = [rest[j], rest[i]];
+      const state = getGuildMusic(guild.id);
+      if (!state.queue.length) {
+        return safeReply(message, { embeds: [xEmbed("Error", "Queue is empty.", false)] });
       }
-
-      gm.queue = [first, ...rest];
+      shuffleArray(state.queue);
       return safeReply(message, { embeds: [xEmbed("Shuffled", "Queue shuffled.", true)] });
     }
 
     if (cmd === "queue") {
-      if (!gm.queue.length) return safeReply(message, { embeds: [xEmbed("Queue", "Queue is empty.", true)] });
+      const state = getGuildMusic(guild.id);
+      if (!state.nowPlaying && !state.queue.length) {
+        return safeReply(message, { embeds: [xEmbed("Queue", "Queue is empty.", true)] });
+      }
 
-      const list = gm.queue
+      const now = state.nowPlaying ? `**Now:** ${state.nowPlaying.title}\n\n` : "";
+      const list = state.queue
         .slice(0, 10)
-        .map((t, i) => `**${i + 1}.** ${t.title}`)
+        .map((t, i) => `\`${i + 1}.\` ${t.title}`)
         .join("\n");
 
       return safeReply(message, {
-        embeds: [xEmbed("Queue", list, true)],
+        embeds: [xEmbed("Queue", `${now}${list || ""}`, true)],
       });
     }
 
-    if (cmd === "np") {
-      if (!gm.nowPlaying) return safeReply(message, { embeds: [xEmbed("Now Playing", "Nothing is playing.", true)] });
-
+    if (cmd === "nowplaying") {
+      const state = getGuildMusic(guild.id);
+      if (!state.nowPlaying) {
+        return safeReply(message, { embeds: [xEmbed("Now Playing", "Nothing playing.", false)] });
+      }
       return safeReply(message, {
         embeds: [
           xEmbed(
             "Now Playing",
-            `${EMOJI.music} **${gm.nowPlaying.title}**\n🔗 ${gm.nowPlaying.url}`,
+            `${EMOJI.music} **${state.nowPlaying.title}**\n🔗 ${state.nowPlaying.url}`,
             true
           ),
         ],
       });
     }
-  } catch (err) {
-    console.log("Message error:", err);
-  }
-});
-
-// =================== INTERACTIONS (WHITELIST PANEL SELECT) ===================
-client.on("interactionCreate", async (interaction) => {
-  try {
-    if (!interaction.isStringSelectMenu()) return;
-    if (interaction.customId !== "wl_select") return;
-
-    await interaction.reply({
-      ephemeral: true,
-      embeds: [
-        xEmbed(
-          "Selected",
-          `You selected: **${interaction.values[0]}**\nNow use:\n\`${PREFIX}wl add @user ${interaction.values[0]}\``,
-          true
-        ),
-      ],
-    });
   } catch (e) {
-    console.log("Interaction error:", e);
+    console.error(e);
+    return;
   }
 });
 
-// =================== REACTION ROLE (optional ready) ===================
-client.on("messageReactionAdd", async (reaction, user) => {
-  try {
-    if (user.bot) return;
-    if (reaction.partial) await reaction.fetch().catch(() => null);
-
-    const msg = reaction.message;
-    if (!msg.guild) return;
-
-    const row = db
-      .prepare("SELECT roleId FROM reaction_roles WHERE guildId=? AND messageId=? AND emoji=?")
-      .get(msg.guild.id, msg.id, reaction.emoji.name);
-
-    if (!row) return;
-
-    const member = await msg.guild.members.fetch(user.id);
-    await member.roles.add(row.roleId).catch(() => null);
-  } catch (e) {
-    console.log("RR add error:", e);
-  }
-});
-
-client.on("messageReactionRemove", async (reaction, user) => {
-  try {
-    if (user.bot) return;
-    if (reaction.partial) await reaction.fetch().catch(() => null);
-
-    const msg = reaction.message;
-    if (!msg.guild) return;
-
-    const row = db
-      .prepare("SELECT roleId FROM reaction_roles WHERE guildId=? AND messageId=? AND emoji=?")
-      .get(msg.guild.id, msg.id, reaction.emoji.name);
-
-    if (!row) return;
-
-    const member = await msg.guild.members.fetch(user.id);
-    await member.roles.remove(row.roleId).catch(() => null);
-  } catch (e) {
-    console.log("RR remove error:", e);
-  }
-});
-
-// =================== LOGIN ===================
-client.login(TOKEN);
+// ====================== LOGIN ======================
+client.login(DISCORD_TOKEN);
